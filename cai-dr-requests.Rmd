@@ -1,0 +1,354 @@
+---
+title: "cai-dr-requests.Rmd"
+author: "Erik Westlund"
+date: "2025-03-17"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(data.table)
+library(dbplyr)
+library(DBI)
+library(glue)
+library(kableExtra)
+library(RPostgres)
+library(dplyr)
+library(readr)
+library(stringr)
+library(tidyr)
+
+if(!file.exists("env.R")) stop("env.R not found")
+
+source("env.R")
+
+cohorts <- readr::read_csv("https://raw.githubusercontent.com/ohdsi-studies/SemaglutideNvamd/refs/heads/main/inst/Cohorts.csv")
+tcs <- readr::read_csv("https://raw.githubusercontent.com/ohdsi-studies/SemaglutideNvamd/refs/heads/main/inst/cmTcList.csv")
+outcomes <- readr::read_csv("https://raw.githubusercontent.com/ohdsi-studies/SemaglutideNvamd/refs/heads/main/inst/oList.csv")
+
+# Create postgres connection
+con <- DBI::dbConnect(RPostgres::Postgres(), dbname = db_name, host = db_host, port = db_port, user = db_user, password = db_password,   options=paste0("-c search_path=", db_schema))
+
+# Data
+database_meta_data <- dplyr::tbl(con, "database_meta_data") |> collect()
+cm_result <- dplyr::tbl(con, "cm_result") |> collect()
+cm_follow_up_dist <- dplyr::tbl(con, "cm_follow_up_dist") |> collect()
+sccs_covariate <- dplyr::tbl(con, "sccs_covariate") |> collect()
+sccs_covariate_result <- dplyr::tbl(con, "sccs_covariate_result") |> collect()
+sccs_result <- dplyr::tbl(con, "sccs_result") |> collect()
+sccs_era <- dplyr::tbl(con, "sccs_era") |> collect()
+sccs_exposure <- dplyr::tbl(con, "sccs_exposure") |> collect()
+sccs_exposures_outcome_set <- dplyr::tbl(con, "sccs_exposures_outcome_set") |> collect()
+sccs_spline <- dplyr::tbl(con, "sccs_spline") |> collect()
+
+# Useful Cohort IDs/data
+specific_nvamdOoutcomeCohortId <- outcomes |> filter(outcome_cohort_name == "Specific NVAMD") |> pull(outcome_cohort_id)
+tdrmaOoutcomeCohortId <- outcomes |> filter(outcome_cohort_name == "Treatment-requiring Diabetic Retinopathy or Macular Edema") |> pull(outcome_cohort_id)
+tdrmaivOoutcomeCohortId <- outcomes |> filter(outcome_cohort_name == "Sensitive NVAMD") |> pull(outcome_cohort_id)
+
+allDrOutcomeIds <- c(specific_nvamdOoutcomeCohortId, tdrmaOoutcomeCohortId, tdrmaivOoutcomeCohortId)
+drSccsOutcomes <- cohorts |> filter(cohort_id %in% 101:106) |> select(cohort_id, cohort_name)
+
+specific_nvamdSccsExposuresOutcomeSetId <- sccs_exposures_outcome_set |> filter(outcome_id == specific_nvamdOoutcomeCohortId)
+tdrmaSccsExposuresOutcomeSetId <- sccs_exposures_outcome_set |> filter(outcome_id == tdrmaOoutcomeCohortId)
+tdrmaivSccsExposuresOutcomeSetId <- sccs_exposures_outcome_set |> filter(outcome_id == tdrmaivOoutcomeCohortId)
+
+drSccsPreexposureCovariateId <- 1000
+drSccsMainCovariateId <- 1001
+
+specific_nvamdSccsExposureCohorts <- sccs_covariate |> 
+  filter(exposures_outcome_set_id %in% specific_nvamdSccsExposuresOutcomeSetId$exposures_outcome_set_id) |> 
+  filter(covariate_id== drSccsMainCovariateId) |> 
+  left_join(cohorts |> select(cohort_id, cohort_name) |> rename(exposure_name = cohort_name), by = c("era_id" = "cohort_id")) |> 
+  select(exposures_outcome_set_id, exposure_name) |> 
+  unique()
+
+tdrmaSccsExposureCohorts <- sccs_covariate |> 
+  filter(exposures_outcome_set_id %in% tdrmaSccsExposuresOutcomeSetId$exposures_outcome_set_id) |> 
+  filter(covariate_id== drSccsMainCovariateId) |> 
+  left_join(cohorts |> select(cohort_id, cohort_name) |> rename(exposure_name = cohort_name), by = c("era_id" = "cohort_id")) |> 
+  select(exposures_outcome_set_id, exposure_name) |> 
+  unique()
+
+tdrmaivSccsExposureCohorts <- sccs_covariate |> 
+  filter(exposures_outcome_set_id %in% tdrmaivSccsExposuresOutcomeSetId$exposures_outcome_set_id) |> 
+  filter(covariate_id== drSccsMainCovariateId) |> 
+  left_join(cohorts |> select(cohort_id, cohort_name) |> rename(exposure_name = cohort_name), by = c("era_id" = "cohort_id")) |> 
+  select(exposures_outcome_set_id, exposure_name) |> 
+  unique()
+
+outcomeIdMap <- list(
+  specific_nvamd = specific_nvamdOoutcomeCohortId,
+  tdrma = tdrmaOoutcomeCohortId,
+  tdrmaiv = tdrmaivOoutcomeCohortId
+)
+```
+
+# Legend
+
+* specific_nvamd = Specific NVAMD
+* TDRMA = Treatment-requiring Diabetic Retinopathy or Macular Edema
+* TDRMAIV = Sensitive NVAMD
+
+# CohortMethod Years {.tabset}
+
+Number of subjects, follow-up time (in years)
+ 
+```{r cm_result, echo=FALSE}
+
+drCmResults <- cm_result |> 
+  mutate(
+    target_id = as.integer(target_id),
+    comparator_id = as.integer(comparator_id),
+    outcome_id = as.integer(outcome_id),
+  ) |> 
+  left_join(database_meta_data |> select(database_id, db_name = cdm_source_name, db = cdm_source_abbreviation), by = c("database_id")) |> 
+  left_join(cohorts |> select(cohort_id, cohort_name) |> rename(target_name = cohort_name), by = c("target_id" = "cohort_id")) |> 
+  left_join(cohorts |> select(cohort_id, cohort_name) |> rename(comparator_name = cohort_name), by = c("comparator_id" = "cohort_id")) |> 
+  left_join(outcomes |> select(outcome_cohort_id, outcome_cohort_name) |> rename(outcome_name = outcome_cohort_name), by = c("outcome_id" = "outcome_cohort_id")) |> 
+  mutate(
+    target_years = (target_days / 365.25) |> round(),
+    comparator_years = (comparator_days / 365.25) |> round(),
+  ) 
+
+specific_nvamdCmResults <- drCmResults |> filter(outcome_id == specific_nvamdOoutcomeCohortId)
+tdrmaCmResults <- drCmResults |> filter(outcome_id == tdrmaOoutcomeCohortId)
+tdrmaivCmResults <- drCmResults |> filter(outcome_id == tdrmaivOoutcomeCohortId)
+
+
+for(outcome in c("specific_nvamd", "tdrma", "tdrmaiv")) {
+  assign(paste0(outcome, "CmResults"), get(paste0(outcome, "CmResults")) |> select(db, outcome_name, target_name, comparator_name, target_years, comparator_years))
+  readr::write_csv(get(paste0(outcome, "CmResults")), paste0("cm_", outcome, "CmResults.csv"))
+}
+
+
+
+```
+
+## specific_nvamd
+
+```{r cm_specific_nvamd_result, echo=FALSE}
+DT::datatable(specific_nvamdCmResults, options = list(pageLength = 25))
+```
+
+## TDRMA
+
+```{r cm_tdrma_result, echo=FALSE}
+DT::datatable(tdrmaCmResults, options = list(pageLength = 25))
+```
+
+## TDRMAIV
+
+```{r cm_tdrmaiv_result, echo=FALSE}
+DT::datatable(tdrmaivCmResults, options = list(pageLength = 25))
+```
+
+# CohortMethod TAR {.tabset}
+
+Time (days) at risk distribution expressed as minimum (min), 25th percentile (P25), median, 75th percentile (P75), and maximum (max) in target & comparator
+
+```{r cm_follow_up_dist, echo=FALSE}
+
+drCmFollowUp <- cm_follow_up_dist |> 
+  mutate(
+    target_id = as.integer(target_id),
+    comparator_id = as.integer(comparator_id),
+    outcome_id = as.integer(outcome_id),
+  ) |> 
+  left_join(database_meta_data |> select(database_id, db_name = cdm_source_name, db = cdm_source_abbreviation), by = c("database_id")) |> 
+  left_join(cohorts |> select(cohort_id, cohort_name) |> rename(target_name = cohort_name), by = c("target_id" = "cohort_id")) |> 
+  left_join(cohorts |> select(cohort_id, cohort_name) |> rename(comparator_name = cohort_name), by = c("comparator_id" = "cohort_id")) |> 
+  left_join(outcomes |> select(outcome_cohort_id, outcome_cohort_name) |> rename(outcome_name = outcome_cohort_name), by = c("outcome_id" = "outcome_cohort_id")) 
+
+specific_nvamdCmFollowUp <- drCmFollowUp |> filter(outcome_id == specific_nvamdOoutcomeCohortId)
+tdrmaCmFollowUp <- drCmFollowUp |> filter(outcome_id == tdrmaOoutcomeCohortId)
+tdrmaivCmFollowUp <- drCmFollowUp |> filter(outcome_id == tdrmaivOoutcomeCohortId)
+
+for(outcome in c("specific_nvamd", "tdrma", "tdrmaiv")) {
+  assign(
+    paste0(outcome, "CmTarDist"), 
+    get(paste0(outcome, "CmFollowUp")) |> select(
+      db,
+      outcome_name, 
+      target_name, 
+      comparator_name, 
+      target_min_days, 
+      target_p_10_days, 
+      target_p_25_days, 
+      target_median_days, 
+      target_p_75_days, 
+      target_p_90_days, 
+      target_max_days, 
+      comparator_min_days, 
+      comparator_p_10_days, 
+      comparator_p_25_days, 
+      comparator_median_days, 
+      comparator_p_75_days, 
+      comparator_p_90_days, 
+      comparator_max_days
+      )|> 
+    mutate(
+      target_min_days = target_min_days |> round(),
+      target_p_10_days = target_p_10_days |> round(),
+      target_p_25_days = target_p_25_days |> round(),
+      target_median_days = target_median_days |> round(),
+      target_p_75_days = target_p_75_days |> round(),
+      target_p_90_days = target_p_90_days |> round(),
+      target_max_days = target_max_days |> round(),
+      comparator_min_days = comparator_min_days |> round(),
+      comparator_p_10_days = comparator_p_10_days |> round(),
+      comparator_p_25_days = comparator_p_25_days |> round(),
+      comparator_median_days = comparator_median_days |> round(),
+      comparator_p_75_days = comparator_p_75_days |> round(),
+      comparator_p_90_days = comparator_p_90_days |> round(),
+      comparator_max_days = comparator_max_days |> round(),
+    ))
+  readr::write_csv(get(paste0(outcome, "CmTarDist")), paste0("cm_", outcome, "TarDist.csv"))
+}
+
+```
+
+## specific_nvamd
+
+```{r cm_specific_nvamd_tar_dist, echo=FALSE}
+DT::datatable(specific_nvamdCmTarDist, options = list(pageLength = 25))
+```
+
+## TDRMA
+
+```{r cm_tdrma_tar_dist, echo=FALSE}
+DT::datatable(tdrmaCmTarDist, options = list(pageLength = 25))
+```
+
+## TDRMAIV
+
+```{r cm_tdrmaiv_tar_dist, echo=FALSE}
+DT::datatable(tdrmaivCmTarDist, options = list(pageLength = 25))
+```
+
+# SCCS {.tabset}
+
+```{r sccs_result, echo=FALSE}
+
+drSccsResults <- sccs_result |> 
+  filter(
+    covariate_id == drSccsMainCovariateId
+  ) |> 
+  left_join(database_meta_data |> select(database_id, cdm_source_name, cdm_source_abbreviation), by = c("database_id"))
+  
+specific_nvamdSccsResults <- drSccsResults |> filter(exposures_outcome_set_id %in% c(specific_nvamdSccsExposuresOutcomeSetId$exposures_outcome_set_id))  |> 
+  left_join(specific_nvamdSccsExposureCohorts |> select(exposures_outcome_set_id, exposure_name), by = c("exposures_outcome_set_id"))
+
+tdrmaSccsResults <- drSccsResults |> filter(exposures_outcome_set_id %in% c(tdrmaSccsExposuresOutcomeSetId$exposures_outcome_set_id)) |> 
+  left_join(tdrmaSccsExposureCohorts |> select(exposures_outcome_set_id, exposure_name), by = c("exposures_outcome_set_id"))
+
+tdrmaivSccsResults <- drSccsResults |> filter(exposures_outcome_set_id %in% c(tdrmaivSccsExposuresOutcomeSetId$exposures_outcome_set_id)) |> 
+  left_join(tdrmaivSccsExposureCohorts |> select(exposures_outcome_set_id, exposure_name), by = c("exposures_outcome_set_id"))
+
+for(outcome in c("specific_nvamd", "tdrma", "tdrmaiv")) {
+  assign(
+    paste0(outcome, "SccsResultsTable"), 
+    get(paste0(outcome, "SccsResults")) |> 
+    select(
+      db = cdm_source_abbreviation,
+      exposure_name,
+      cases = outcome_subjects,
+      days_observed = observed_days,
+      outcomes = outcome_events,
+      persons_exposed = covariate_subjects,
+      outcomes_while_exposed = covariate_outcomes,
+      days_exposed = covariate_days,
+    ) |> 
+    mutate(
+      years_observed = (days_observed / 365.25) |> round(2),
+      years_exposed = (days_exposed / 365.25) |> round(2)
+    ) |> 
+    select(
+      -days_observed
+    ) |> 
+    select(
+      db, exposure_name, cases, years_observed, outcomes, persons_exposed, years_exposed, outcomes_while_exposed
+    )
+  )
+  readr::write_csv(get(paste0(outcome, "SccsResultsTable")), paste0("sccs_", outcome, "_results.csv"))
+}
+
+```
+
+## specific_nvamd
+
+```{r sccs_specific_nvamd_results, echo=FALSE}
+DT::datatable(specific_nvamdSccsResultsTable, options = list(pageLength = 25))
+```
+
+## TDRMA
+
+```{r sccs_tdrma_results, echo=FALSE}
+DT::datatable(tdrmaSccsResultsTable, options = list(pageLength = 25))
+```
+
+## TDRMAIV
+
+```{r sccs_tdrmaiv_results, echo=FALSE}
+DT::datatable(tdrmaivSccsResultsTable, options = list(pageLength = 25))
+```
+
+# SCCS Pre-exposure IRR {.tabset}
+
+```{r sccs_preexposure_irr, echo=FALSE}
+
+drSccsPreexposureIRR <- sccs_covariate_result |> 
+  filter(
+    covariate_id == drSccsPreexposureCovariateId,
+  ) |> 
+  left_join(database_meta_data |> select(database_id, cdm_source_name, cdm_source_abbreviation), by = c("database_id")) 
+
+specific_nvamdSccsPreexposureIRR <- drSccsPreexposureIRR |> filter(exposures_outcome_set_id %in% c(specific_nvamdSccsExposuresOutcomeSetId$exposures_outcome_set_id)) |> 
+  left_join(specific_nvamdSccsExposureCohorts |> select(exposures_outcome_set_id, exposure_name), by = c("exposures_outcome_set_id"))
+
+tdrmaSccsPreexposureIRR <- drSccsPreexposureIRR |> filter(exposures_outcome_set_id %in% c(tdrmaSccsExposuresOutcomeSetId$exposures_outcome_set_id)) |>
+  left_join(tdrmaSccsExposureCohorts |> select(exposures_outcome_set_id, exposure_name), by = c("exposures_outcome_set_id"))
+  
+tdrmaivSccsPreexposureIRR <- drSccsPreexposureIRR |> filter(exposures_outcome_set_id %in% c(tdrmaivSccsExposuresOutcomeSetId$exposures_outcome_set_id)) |>
+  left_join(tdrmaivSccsExposureCohorts |> select(exposures_outcome_set_id, exposure_name), by = c("exposures_outcome_set_id"))
+
+for(outcome in c("specific_nvamd", "tdrma", "tdrmaiv")) {
+  assign(
+    paste0(outcome, "SccsPreexposureIRRTable"), 
+    get(paste0(outcome, "SccsPreexposureIRR")) |> 
+    select(
+      db = cdm_source_abbreviation,
+      exposure_name,
+      preexposure_irr = rr,
+      lb = ci_95_lb,
+      ub = ci_95_ub,
+    ) |> 
+    mutate(
+      preexposure_irr = preexposure_irr |> round(2),
+      lb = lb |> round(2),
+      ub = ub |> round(2)
+    )
+  )
+  readr::write_csv(get(paste0(outcome, "SccsPreexposureIRRTable")), paste0("sccs_", outcome, "_preexposure_irr.csv"))
+}
+
+```
+
+## specific_nvamd
+
+```{r sccs_specific_nvamd_preexposure_irr, echo=FALSE}
+DT::datatable(specific_nvamdSccsPreexposureIRRTable, options = list(pageLength = 25))
+```
+
+## TDRMA
+
+```{r sccs_tdrma_preexposure_irr, echo=FALSE}
+DT::datatable(tdrmaSccsPreexposureIRRTable, options = list(pageLength = 25))
+```
+
+## TDRMAIV
+
+```{r sccs_tdrmaiv_preexposure_irr, echo=FALSE}
+DT::datatable(tdrmaivSccsPreexposureIRRTable, options = list(pageLength = 25))
+```

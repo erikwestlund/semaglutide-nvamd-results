@@ -1,0 +1,16 @@
+*_cache*/
+*_files/
+
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+
+env.R
+*.html
+r*cache*
+*.rds
+*.xl*
+*.zip
+*.csv
+.DS_Store
