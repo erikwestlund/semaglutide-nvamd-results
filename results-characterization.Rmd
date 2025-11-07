@@ -78,10 +78,6 @@ allCohortDefinitions <- DBI::dbGetQuery(con, "SELECT * FROM cg_cohort_definition
 
 # Cohorts in Table 1
 
-We want to show data on patients who enter between 2017 and before 2023. The cohort definition IDs align with those in the package, but have a suffix of 001.
-
-*Note:* These cohorts are not defined in the study package, but exist in the database. Do we need to document how these are run somewhere?
-
 We are going to select:
 
 * Prior T2DM
@@ -99,12 +95,12 @@ These can be changed.
 
 ```{r cohorts_chosen, echo=FALSE}
 cohortIds <- c(
-  201001, # Semaglutide
-  211001, # Dulaglutide
-  212001, # Exenatide
-  213001, # Empagliflozin
-  214001, # Sitagliptin
-  215001  # Glipizide
+  201, # Semaglutide
+  211, # Dulaglutide
+  212, # Exenatide
+  213, # Empagliflozin
+  214, # Sitagliptin
+  215  # Glipizide
 )
 
 restrictedCohortDefs <- allCohortDefinitions |> 
@@ -148,7 +144,7 @@ FROM
 	semanaion.c_covariates cov
 	INNER JOIN semanaion.c_cohort_details cd ON cd.cohort_definition_id = cov.cohort_definition_id
 		AND cd.database_id = cov.database_id
-		AND cd.cohort_type = 'T'
+		AND cd.cohort_type = 'Target'
 	INNER JOIN semanaion.cg_cohort_definition t ON t.cohort_definition_id = cd.target_cohort_id
 	INNER JOIN semanaion.c_covariate_ref cref ON cov.covariate_id = cref.covariate_id
 		AND cov.database_id = cref.database_id
